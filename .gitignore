@@ -1,0 +1,26 @@
+# Save this file as ".gitignore" (with the leading dot) in your repo root.
+# Commit it BEFORE anything else — that ordering is what prevents an accidental
+# `git add .` from capturing a key in your very first commit.
+
+# ---- secrets: never commit ----
+.env
+.env.*
+sa.json
+*service-account*.json
+*credentials*.json
+*.pem
+*.key
+
+# ---- generated ----
+hnb_usd_buying.png
+hnb_watch_state.json
+log.txt
+__pycache__/
+*.pyc
+
+# NOTE: hnb_usd_buying.csv is intentionally NOT ignored. It is your rate history
+# and the whole point of the exercise — GitHub Actions commits it back each run.
+
+# ---- macOS ----
+.DS_Store
+.venv/
