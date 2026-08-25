@@ -1,0 +1,90 @@
+# .github/workflows/hnb-watch.yml
+#
+# Runs the watcher every weekday in GitHub's cloud, so nothing depends on your Mac
+# being awake. The CSV history is committed back to the repo, which keeps a durable
+# record even if the sheet is edited by hand.
+#
+# Secrets to add under Settings > Secrets and variables > Actions > Secrets:
+#   GOOGLE_SA_JSON     the full service-account JSON, pasted as one secret
+#   SHEET_ID           1f1CZB6vt688B48VoNU1fK64huntXTwQW-zztvQ9WA4s
+#   TELEGRAM_BOT_TOKEN from @BotFather
+#   TELEGRAM_CHAT_ID   from @userinfobot
+#
+# Optional, under the Variables tab (not Secrets — these aren't sensitive, and
+# keeping them as variables lets you retune the rule without editing this file):
+#   ALERT_MODE         n_day_high | threshold | both     (default n_day_high)
+#   ALERT_WINDOW       30
+#   ALERT_THRESHOLD    e.g. 330.0
+#   ALERT_COOLDOWN_DAYS 3
+#
+# Email is deliberately omitted: a Gmail App Password grants permanent send-as-you
+# access to your whole mailbox, which is far too much authority for a rate ping.
+# Telegram gives the same phone notification with a token that can only message you.
+#
+# Remember to share the sheet with the service account's client_email address,
+# giving it Editor access, or the append will fail with a permission error.
+
+name: HNB USD rate watch
+
+on:
+  schedule:
+    # 04:30 UTC = 10:00 Sri Lanka time (UTC+5:30), Mon-Fri.
+    # GitHub runs cron in UTC only, and may delay a run under load.
+    - cron: "30 4 * * 1-5"
+  workflow_dispatch: {}   # lets you trigger a run by hand to test
+
+permissions:
+  contents: write         # needed to commit the updated CSV
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright pandas gspread google-auth requests
+          playwright install --with-deps chromium
+
+      - name: Write service account key
+        env:
+          # Passed via env, never interpolated into the shell command. Direct
+          # ${{ }} substitution inside `run:` breaks on quotes in the JSON and
+          # can expose the value in traces.
+          SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
+        run: |
+          if [ -n "$SA_JSON" ]; then
+            printf '%s' "$SA_JSON" > sa.json
+            chmod 600 sa.json
+            python -c "import json;json.load(open('sa.json'));print('service account key parsed OK')"
+          else
+            echo "GOOGLE_SA_JSON not set — will write CSV only, no sheet update."
+          fi
+
+      - name: Run watcher
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GOOGLE_SA_JSON: sa.json
+          ALERT_MODE: ${{ vars.ALERT_MODE || 'n_day_high' }}
+          ALERT_WINDOW: ${{ vars.ALERT_WINDOW || '30' }}
+          ALERT_THRESHOLD: ${{ vars.ALERT_THRESHOLD }}
+          ALERT_COOLDOWN_DAYS: ${{ vars.ALERT_COOLDOWN_DAYS || '3' }}
+          # Telegram only — no Gmail App Password, which would grant send-as-you
+          # access to the whole mailbox for the sake of a notification.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python hnb_watch.py run
+
+      - name: Commit updated history
+        run: |
+          rm -f sa.json
+          git config user.name "hnb-watch-bot"
+          git config user.email "actions@github.com"
+          git add hnb_usd_buying.csv hnb_watch_state.json || true
+          git diff --staged --quiet || git commit -m "rates: $(date -u +%Y-%m-%d)"
+          git push || true
