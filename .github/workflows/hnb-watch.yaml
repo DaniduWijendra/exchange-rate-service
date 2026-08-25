@@ -58,13 +58,29 @@ jobs:
           # can expose the value in traces.
           SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
         run: |
-          if [ -n "$SA_JSON" ]; then
-            printf '%s' "$SA_JSON" > sa.json
-            chmod 600 sa.json
-            python -c "import json;json.load(open('sa.json'));print('service account key parsed OK')"
-          else
-            echo "GOOGLE_SA_JSON not set — will write CSV only, no sheet update."
+          # Whitespace-only counts as unset: a secret saved with an empty paste
+          # is non-empty to the shell but useless, which is a confusing failure.
+          if [ -z "$(printf '%s' "$SA_JSON" | tr -d '[:space:]')" ]; then
+            echo "::warning::GOOGLE_SA_JSON is empty or whitespace. Skipping the"\
+                 "sheet update; the CSV and Telegram alert still work."
+            exit 0
           fi
+          printf '%s' "$SA_JSON" > sa.json
+          chmod 600 sa.json
+          python - <<'PY'
+          import json, sys
+          try:
+              key = json.load(open("sa.json"))
+          except Exception as exc:
+              sys.exit("::error::GOOGLE_SA_JSON is not valid JSON (%s). Re-add the "
+                       "secret with the ENTIRE contents of your key file, starting "
+                       "with { and ending with }." % exc)
+          missing = [k for k in ("type", "client_email", "private_key") if k not in key]
+          if missing:
+              sys.exit("::error::key file is missing %s -- looks like a partial paste."
+                       % ", ".join(missing))
+          print("service account key OK:", key["client_email"])
+          PY
 
       - name: Run watcher
         env:
