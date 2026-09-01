@@ -28,9 +28,14 @@ name: HNB USD rate watch
 
 on:
   schedule:
-    # 04:30 UTC = 10:00 Sri Lanka time (UTC+5:30), Mon-Fri.
-    # GitHub runs cron in UTC only, and may delay a run under load.
-    - cron: "30 4 * * 1-5"
+    # 05:00 UTC = 10:30 Sri Lanka time (UTC+5:30).
+    # NOTE: this is only a BACKSTOP. GitHub's cron scheduler has been observed
+    # starting this workflow 6-12 hours late, which is useless for same-day
+    # action. The punctual trigger is the external scheduler (Cloudflare Worker)
+    # calling workflow_dispatch, and/or the local launchd job. Runs are
+    # idempotent -- deduped on the page's own date -- so firing from several
+    # sources on the same day is harmless.
+    - cron: "0 5 * * *"
   workflow_dispatch: {}   # lets you trigger a run by hand to test
 
 permissions:
@@ -101,6 +106,12 @@ jobs:
           rm -f sa.json
           git config user.name "hnb-watch-bot"
           git config user.email "actions@github.com"
-          git add hnb_usd_buying.csv hnb_watch_state.json || true
+          # -f because .gitignore blocks *.json. The state file carries the
+          # alert cooldown; without committing it, every cloud run starts with
+          # a blank cooldown and a sustained high would alert every single day.
+          git add hnb_usd_buying.csv || true
+          git add -f hnb_watch_state.json || true
           git diff --staged --quiet || git commit -m "rates: $(date -u +%Y-%m-%d)"
+          # Rebase before pushing: the local launchd job may have pushed first.
+          git pull --rebase --autostash || true
           git push || true

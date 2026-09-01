@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd requires absolute paths, so this file is the one place a machine-specific
+  path is unavoidable. Written for HOME=/Users/wso2 and the repo at
+  /Users/wso2/Documents/mine/exchangeInfo.
+
+  If the repo lives somewhere else, fix every path below in one go:
+    sed -i '' "s|/Users/wso2/Documents/mine/exchangeInfo|$PWD|g" com.hnbwatch.daily.plist
+
+  Verify before loading:
+    plutil -lint com.hnbwatch.daily.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hnbwatch.daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/wso2/Documents/mine/exchangeInfo/run_daily.sh</string>
+    </array>
+
+    <!-- 10:30 local time, every day. launchd uses the Mac's own time zone, so
+         this is genuinely 10:30 in Colombo with no UTC arithmetic. If the Mac
+         was asleep at 10:30, launchd runs the job when it next wakes, rather
+         than silently skipping it the way plain cron does. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/wso2/Documents/mine/exchangeInfo</string>
+
+    <!-- run_daily.sh writes its own log; these catch anything failing before
+         the script's redirect takes effect. -->
+    <key>StandardOutPath</key>
+    <string>/Users/wso2/Documents/mine/exchangeInfo/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/wso2/Documents/mine/exchangeInfo/launchd.err.log</string>
+</dict>
+</plist>

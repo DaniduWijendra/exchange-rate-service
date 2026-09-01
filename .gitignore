@@ -28,3 +28,5 @@ __pycache__/
 # no JSON belongs in this repo; keys arrive with unpredictable names
 *.json
 *.bak
+run_daily.log
+launchd.*.log
