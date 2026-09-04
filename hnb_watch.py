@@ -282,12 +282,68 @@ def read_history(exclude_date: str | None = None) -> list[tuple[str, float]]:
     return sorted(out)
 
 
+def report_problem(what: str, exc: Exception, state: dict, fatal: bool) -> None:
+    """
+    Tell the user something broke.
+
+    Rationale: for three days this script failed on every scheduled run and the
+    phone stayed silent, because alerts only fired on a rate high. A crash and a
+    flat market were indistinguishable from the outside. Anyone acting on these
+    alerts with real money needs to know when the pipeline is down.
+
+    Deduplicated to one notice per calendar day per failure type, so a week of
+    outage is a week of daily nudges rather than an unread pile.
+    """
+    today = dt.date.today().isoformat()
+    key = f"last_failure_notified:{what}"
+    detail = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+
+    print(f"{'FATAL' if fatal else 'WARNING'} ({what}): {detail}", file=sys.stderr)
+
+    if state.get(key) == today:
+        print(f"  already notified about '{what}' today -- staying quiet", file=sys.stderr)
+        return
+
+    subject = f"HNB rate watcher: {what} failed"
+    body = (
+        f"The rate watcher hit a problem on {today}.\n\n"
+        f"  stage:  {what}\n"
+        f"  error:  {type(exc).__name__}: {detail}\n\n"
+        + (
+            "No rate was recorded for today, so you are NOT being alerted about\n"
+            "rate movements right now. Check the rate manually if you are close\n"
+            "to converting.\n\n"
+            if fatal else
+            "The rate WAS recorded and alerting still works; only this stage\n"
+            "failed, so your sheet may be behind.\n\n"
+        )
+        + "Common causes:\n"
+        "  - hnb.lk slow or down (the scrape retries 3x before giving up)\n"
+        "  - page layout changed, so the USD row no longer parses\n"
+        "  - service account key deleted or rotated (Invalid JWT Signature)\n"
+        "  - sheet no longer shared with the service account\n\n"
+        f"Source: {scraper.URL}\n"
+    )
+    notify(subject, body)
+
+    state[key] = today
+    save_state(state)
+
+
 def cmd_run() -> None:
-    text = scraper.fetch_page_text()
-    rates = scraper.parse_usd_row(text)
-    date = scraper.scrape_effective_date(text)
-    buying = rates[scraper.DEFAULT_BUYING_COLUMN]
-    selling = rates.get("tt_selling", float("nan"))
+    state = load_state()
+
+    # --- scrape: fatal, nothing else can proceed without it ---
+    try:
+        text = scraper.fetch_page_text()
+        rates = scraper.parse_usd_row(text)
+        date = scraper.scrape_effective_date(text)
+        buying = rates[scraper.DEFAULT_BUYING_COLUMN]
+        selling = rates.get("tt_selling", float("nan"))
+    except Exception as exc:  # noqa: BLE001 - any failure here must be reported
+        report_problem("scrape", exc, state, fatal=True)
+        raise SystemExit(1)
+
     print(f"{date}  buying {buying:,.4f}  selling {selling:,.4f}")
 
     scraper.append_snapshot(
@@ -297,10 +353,16 @@ def cmd_run() -> None:
             **{c: rates.get(c, "") for c in scraper.COLUMN_LABELS},
         }
     )
-    push_to_sheet([date, buying, selling, "hnb.lk/exchange-rates"])
+
+    # --- sheet: non-fatal. A Sheets outage must not cost you the alert, which
+    # is what happened when a stale key raised here and killed the run before
+    # the rate was ever evaluated. ---
+    try:
+        push_to_sheet([date, buying, selling, "hnb.lk/exchange-rates"])
+    except Exception as exc:  # noqa: BLE001
+        report_problem("sheet update", exc, state, fatal=False)
 
     history = read_history(exclude_date=date)
-    state = load_state()
     fire, reason = evaluate_alert(
         history,
         date,
