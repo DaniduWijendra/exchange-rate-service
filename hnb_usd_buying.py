@@ -33,6 +33,7 @@ import csv
 import datetime as dt
 import re
 import sys
+import time
 from pathlib import Path
 
 URL = "https://www.hnb.lk/exchange-rates"
@@ -62,37 +63,92 @@ SANE_RANGE = (100.0, 1000.0)
 # --------------------------------------------------------------------------- #
 # Scraping
 # --------------------------------------------------------------------------- #
-def fetch_page_text(headful: bool = False, timeout_ms: int = 45_000) -> str:
-    """Render the exchange-rates page and return its visible text."""
+def _fetch_once(headful: bool, nav_timeout_ms: int, content_timeout_ms: int) -> str:
+    """One attempt: render the page and return its visible text."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not headful)
+        try:
+            page = browser.new_page(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Safari/537.36"
+                )
+            )
+            # "domcontentloaded", NOT "networkidle".
+            #
+            # networkidle waits for 500ms of zero network traffic. Pages with
+            # analytics, chat widgets or polling never go quiet, so goto() just
+            # burns the whole timeout and raises -- which is exactly how this
+            # broke on GitHub's runners while still working on a laptop.
+            # Playwright's own docs discourage networkidle for this reason.
+            page.goto(URL, wait_until="domcontentloaded", timeout=nav_timeout_ms)
+
+            # Then wait for the thing we actually need: a USD row with two
+            # rates on it. This is the real readiness signal, and it makes the
+            # wait independent of whatever else the page is loading.
+            page.wait_for_function(
+                """() => {
+                    const t = document.body.innerText || "";
+                    const line = t.split("\\n").find(l =>
+                        /\\bUSD\\b|\\bUS\\s*DOLLAR/i.test(l) &&
+                        (l.match(/\\d+\\.\\d{2,4}/g) || []).length >= 2
+                    );
+                    return Boolean(line);
+                }""",
+                timeout=content_timeout_ms,
+            )
+            return page.inner_text("body")
+        finally:
+            browser.close()
+
+
+def fetch_page_text(
+    headful: bool = False,
+    timeout_ms: int = 120_000,
+    attempts: int = 3,
+) -> str:
+    """
+    Render the exchange-rates page and return its visible text.
+
+    The 120s default is deliberate and not paranoia: hnb.lk has been observed
+    taking over 45 seconds just to return its initial HTML, which is why the
+    original 45s timeout failed on three consecutive scheduled runs while a
+    browser sitting on the same page loaded it fine given long enough.
+
+    Retries on top of that, since a slow origin fails intermittently rather
+    than consistently.
+    """
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
         sys.exit(
             "Playwright is required.\n"
             "  pip install playwright pandas matplotlib\n"
-            "  playwright install chromium"
+            "  python -m playwright install chromium"
         )
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headful)
-        page = browser.new_page(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            )
-        )
-        page.goto(URL, wait_until="networkidle", timeout=timeout_ms)
-        # Wait until the currency actually appears rather than a fixed sleep.
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
         try:
-            page.wait_for_function(
-                "() => /USD|US\\s*DOLLAR/i.test(document.body.innerText)",
-                timeout=timeout_ms,
-            )
-        except Exception:
-            pass  # fall through; the parser will complain if it's genuinely absent
-        text = page.inner_text("body")
-        browser.close()
-    return text
+            # Navigation gets the full budget; once HTML has arrived, the React
+            # render is quick, so the content wait needs far less.
+            return _fetch_once(headful, timeout_ms, min(timeout_ms, 60_000))
+        except Exception as exc:  # noqa: BLE001 - retry any browser-side failure
+            last_error = exc
+            first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+            print(f"attempt {attempt}/{attempts} failed: {first_line}", file=sys.stderr)
+            if attempt < attempts:
+                delay = 5 * attempt  # 5s, then 10s
+                print(f"  retrying in {delay}s...", file=sys.stderr)
+                time.sleep(delay)
+
+    raise RuntimeError(
+        f"Could not load {URL} after {attempts} attempts. "
+        f"Last error: {last_error}"
+    )
 
 
 def parse_usd_row(page_text: str, verbose: bool = False) -> dict[str, float]:
